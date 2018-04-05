@@ -6,11 +6,11 @@
 * Update packages `Pkg.update()`
 * add package `Pkg.clone("https://github.com/jotwin/GlobalEpistasis.jl")`, note this will add NLopt, CSV, and DataFrames packages
 
-Load data into julia, [CSV doc](http://juliadata.github.io/CSV.jl/stable/)
+Load data into julia, [CSV doc](http://juliadata.github.io/CSV.jl/stable/). Test data is a subset of [Wu et al. eLife 2016](https://elifesciences.org/content/5/e16965/)
 ```
 using CSV
 using DataFrames
-dataf = CSV.read("test/wu4sites_test.txt") # this is a subset of [Wu et al. eLife 2016](https://elifesciences.org/content/5/e16965/)
+dataf = CSV.read("test/wu4sites_test.txt")
 ```
 ## prepare data
 
