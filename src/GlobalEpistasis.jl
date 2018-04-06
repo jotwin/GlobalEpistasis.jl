@@ -1,6 +1,6 @@
 module GlobalEpistasis
 
-export prepdata, nonepistatic_model, spmfit
+export prepdata, nonepistatic_model, fit
 
 using NLopt
 using DataFrames
@@ -33,9 +33,9 @@ function prepdata(df, seqname, kind, wt, yname; delim = '-', cname = nothing, vn
         seq = df[seqname]
         ns = length(wt)
         for i = 1:n
-            if seq[i] != wt
-                for p = 1:ns
-                    a = seq[i][p]
+            for p = 1:ns
+				a = seq[i][p]
+	            if a != wt[p]
                     k = string(wt[p], p, a)
                     if !haskey(code, k)
                         code[k] = j
@@ -490,6 +490,9 @@ function spmopt(mi, estimate_alpha = haskey(mi, :a), estimate_beta = haskey(mi, 
 		m[:beta][:b] = beta
 	end
 	sort!(m[:beta], cols=:pos)
+	if haskey(data, :c)
+		m[:prediction][:c] = data[:c]
+	end
     return m
 end
 

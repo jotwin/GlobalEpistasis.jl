@@ -43,7 +43,7 @@ output is a dictionary with keys:
 * `:beta` is a data frame of additive effects
 * `:r2` r-squared
 * `:sigma2` HOC epistasis variance
-* `:prediction` data frame of measured phenotype (y), inferred measured phenotype (yhat), and inferred additive trait (phi, rescaled)
+* `:prediction` data frame of measured phenotype (y), inferred measured phenotype (yhat), and inferred additive trait (phi, rescaled), and (optional) conditions
 * `:rmse` root mean squared error
 * `:ll` log-likelihood
 
@@ -67,3 +67,5 @@ CSV.write("prediction.txt", m[:prediction])
 
 ```
 
+## modifying initial conditions
+the fit function first argument is an initial model `m` with entries `m[:a]` and `m[:b]`. These can be modified to change the intial parameters. Also you can change the non-epistatic model e.g. `mlin[:a] = [0, 0, 0, 0, 0]`
