@@ -5,6 +5,7 @@
 * Learn some julia (e.g. [wikibooks](https://en.wikibooks.org/wiki/Introducing_Julia))
 * Update packages `Pkg.update()`
 * add package `Pkg.clone("https://github.com/jotwin/GlobalEpistasis.jl")`, note this will add NLopt, CSV, and DataFrames packages
+* I recommend [IJulia](https://github.com/JuliaLang/IJulia.jl) for an interactive notebook interface
 
 Load data into julia, [CSV doc](http://juliadata.github.io/CSV.jl/stable/). Test data is a subset of [Wu et al. eLife 2016](https://elifesciences.org/content/5/e16965/)
 ```

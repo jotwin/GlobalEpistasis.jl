@@ -4,14 +4,13 @@ export prepdata, nonepistatic_model, fit
 
 using NLopt
 using DataFrames
-
-function prepdata(df, seqname, kind, wt, yname; delim = '-', cname = nothing, vname = nothing, condition_type = :categorical)
+function prepdata(df, seqname, kind, wt, yname; delim = '-', order=1, cname = nothing, vname = nothing, condition_type = :categorical)
     n = nrow(df)
     I = collect(1:n)
     J = ones(Int64, n)
     j = 2
-    aa = Char[]
-    pos = Int64[]
+#     aa = Char[]
+#     pos = Int64[]
     code = Dict{String, Int64}()
     if kind == :listofmuts
         muts = df[seqname]
@@ -20,8 +19,8 @@ function prepdata(df, seqname, kind, wt, yname; delim = '-', cname = nothing, vn
                 for k in split(muts[i], delim)
                     if !haskey(code, k)
                         code[k] = j
-                        push!(aa, k[end])
-                        push!(pos, parse(k[2:end-1]))
+#                         push!(aa, k[end])
+#                         push!(pos, parse(k[2:end-1]))
                         j += 1
                     end
                     push!(J, code[k])
@@ -34,13 +33,13 @@ function prepdata(df, seqname, kind, wt, yname; delim = '-', cname = nothing, vn
         ns = length(wt)
         for i = 1:n
             for p = 1:ns
-				a = seq[i][p]
-	            if a != wt[p]
+                a = seq[i][p]
+                if a != wt[p]
                     k = string(wt[p], p, a)
                     if !haskey(code, k)
                         code[k] = j
-                        push!(aa, a)
-                        push!(pos, p)
+#                         push!(aa, a)
+#                         push!(pos, p)
                         j += 1
                     end
                     push!(J, code[k])
@@ -50,16 +49,37 @@ function prepdata(df, seqname, kind, wt, yname; delim = '-', cname = nothing, vn
         end
     end
     x = sparse(I, J, 1.0)
+    icode = ["" for i = 1:size(x,2)]
+    for (k, v) in code
+        icode[v] = k
+    end
+    ham = ceil.(Int64, vec(sum(x,2))-1)
+    if order == 2
+        for m = 3:size(x,2)
+            for k = 2:m-1
+                xx = x[:,m].*x[:,k]
+                if sum(xx) > 0.0
+                    x = hcat(x, xx)
+                    key = string(icode[k], delim, icode[m])
+                    code[key] = j
+                    push!(icode, key)
+                    j += 1
+                end
+            end
+        end
+    end
     g = trues(size(x,2))
     g[1] = false
-    ham = ceil.(Int64, vec(sum(x,2))-1)
 	
     if any(ismissing.(df[yname]))
 		error("missing values in phenotype")
 	end
 	y = collect(Missings.skipmissing(df[yname]))
-    dout = Dict(:x => x, :y => y, :code => code, :g => g,
-                :ham=> ham, :pos => pos, :aa => aa)
+    dout = Dict(:x => x, :y => y, :code => code, :icode => icode, :g => g,
+                :ham=> ham)#:pos => pos, :aa => aa, :order => order
+#     if order == 2
+#         dout[:pairs] = DataFrame(pos1 = pos1, pos2 = pos2, aa1 = aa1, aa2 = aa2)
+#     end
     if vname != nothing
         dout[:v] = collect(Missings.replace(df[vname], 0.0))
 		if any(dout[:v] .< 0.0)
@@ -336,9 +356,10 @@ function spmopt(mi, estimate_alpha = haskey(mi, :a), estimate_beta = haskey(mi, 
         iv = nothing
 	    v = nothing
     end
-    
-    phi = copy(mi[:phi])
     b = copy(mi[:b])
+    phi = x*b
+    #phi = copy(mi[:phi])
+    #b = copy(mi[:b])
     if estimate_alpha && !estimate_beta
         minphi, maxphi = extrema(phi)
         # rescale phi to have range 0..1
@@ -452,47 +473,53 @@ function spmopt(mi, estimate_alpha = haskey(mi, :a), estimate_beta = haskey(mi, 
     else
         m[:b] = b
     end
+    m[:prediction] = DataFrame(:y => m[:data][:y])
+    
     if haskey(data, :c)
         #phiE = view(x, :, .!g) * m[:b][.!g]
 	    m[:be] = m[:b][.!g]
-	    m[:phiE] = x[:, .!g] * m[:be]
+	    m[:prediction][:phiE] = x[:, .!g] * m[:be]
     end
 
-    m[:phi] = x*m[:b]
+    #m[:phi] = x*m[:b]
 
     if estimate_alpha
+        m[:prediction][:phi] = x*m[:b]
         m[:a] = p[arange]
-        m[:yhat] = monosplinebasis1(m[:phi], knots, 3)[2]*m[:a]
+        m[:prediction][:yhat] = monosplinebasis1(m[:prediction][:phi], knots, 3)[2]*m[:a]
         m[:knots] = knots
         m[:a_upper_bound] = a_upper_bound
     else
-        m[:yhat] = m[:phi]
+        m[:prediction][:yhat] = x*m[:b]
     end
 
-    m[:r2] = cor(y, m[:yhat])^2
-	m[:rmse] = sqrt(mean((m[:yhat]-data[:y]).^2))
+    m[:r2] = cor(y, m[:prediction][:yhat])^2
+	m[:rmse] = sqrt(mean((m[:prediction][:yhat]-data[:y]).^2))
     if estimate_sigma2
         m[:sigma2] = exp(p[1])
         if estimate_sigma2p
             m[:sigma2p] = exp(p[2])
         end
     else
-        m[:sigma2] = mean((y.-m[:yhat]).^2)
+        m[:sigma2] = mean((y.-m[:prediction][:yhat]).^2)
         m[:ll] = -n/2*log(m[:sigma2])
     end
-	m[:beta] = DataFrame(:pos => m[:data][:pos], :aa => m[:data][:aa])
-	m[:prediction] = DataFrame(:y => m[:data][:y], :yhat => m[:yhat])
+	#m[:beta] = DataFrame(:pos => m[:data][:pos], :aa => m[:data][:aa])
+	#m[:prediction] = DataFrame(:y => m[:data][:y], :yhat => m[:yhat])
 	beta = m[:b][g]
+    m[:beta] = DataFrame(mut = m[:data][:icode][2:end])
     if estimate_alpha 
 		m[:beta][:b] = beta/mean(abs.(beta))
 		m[:prediction][:phi] = x[:, g] * beta
 	else
 		m[:beta][:b] = beta
 	end
-	sort!(m[:beta], cols=:pos)
+	#sort!(m[:beta], cols=:pos)
 	if haskey(data, :c)
 		m[:prediction][:c] = data[:c]
 	end
+#     if m[:data][:order] == 2
+        
     return m
 end
 
