@@ -1,6 +1,6 @@
 module GlobalEpistasis
 
-export prepdata, nonepistatic_model, fit
+export prepdata, nonepistatic_model, fit, boot, boot_stats, predict, cvpredict, lrt
 
 using NLopt
 using DataFrames
@@ -59,7 +59,7 @@ function prepdata(df, seqname, kind, wt, yname; delim = '-', cname = nothing, vn
 	end
 	y = collect(Missings.skipmissing(df[yname]))
     dout = Dict(:x => x, :y => y, :code => code, :g => g,
-                :ham=> ham, :pos => pos, :aa => aa)
+                :ham=> ham, :pos => pos, :aa => aa, :wt => wt)
     if vname != nothing
         dout[:v] = collect(Missings.replace(df[vname], 0.0))
 		if any(dout[:v] .< 0.0)
@@ -304,7 +304,7 @@ function spmopt(mi, estimate_alpha = haskey(mi, :a), estimate_beta = haskey(mi, 
         nk = 4, knots = :linear, 
         a_upper_bound = get(mi, :a_upper_bound, [Inf, Inf]), 
 		a_lower_bound = get(mi, :a_lower_bound, [0.0, 0.0]),
-        maxit = 1000000, alg = :LD_LBFGS, tol=1e-14)
+        maxit = 1000000, alg = :LD_LBFGS, tol=1e-14, constrainbeta = true)
 
     
     data = mi[:data]
@@ -337,8 +337,8 @@ function spmopt(mi, estimate_alpha = haskey(mi, :a), estimate_beta = haskey(mi, 
 	    v = nothing
     end
     
-    phi = copy(mi[:phi])
-    b = copy(mi[:b])
+    phi = deepcopy(mi[:phi])
+    b = deepcopy(mi[:b])
     if estimate_alpha && !estimate_beta
         minphi, maxphi = extrema(phi)
         # rescale phi to have range 0..1
@@ -415,7 +415,7 @@ function spmopt(mi, estimate_alpha = haskey(mi, :a), estimate_beta = haskey(mi, 
             arange, brange, M, I, t, slope1, slope2, 
             phi, yhatp, llmem, gs2, gs2p, rsy, rsvi, iv0, iv)
     max_objective!(opt, cb)
-    (ll, p, ret) = optimize!(opt, pi)
+	(ll, p, ret) = optimize!(opt, pi)
     #if estimate_alpha && estimate_beta
     #    a = p[arange]
     #    if a[2] < 0.01 || a[end] < 0.01
@@ -434,12 +434,12 @@ function spmopt(mi, estimate_alpha = haskey(mi, :a), estimate_beta = haskey(mi, 
     #    end
     #end
     g = data[:g]
-	if estimate_beta && estimate_alpha && all(data[:ham] .<= 1) # single mutants multi conditions
+	if constrainbeta && estimate_beta && estimate_alpha && all(data[:ham] .<= 1) && haskey(data, :c) # single mutants multi conditions
 		betabad = p[brange]
 		phiE = x[:, .!g] * betabad[.!g]
 	    constrain_betas!(p[arange], betabad, g, phiE, 0.1)
 		p[brange] = betabad
-		#display("constraining betas, reoptimizing")
+		display("constraining betas")
     	#(ll, p, ret) = optimize!(opt, p)
 		#constrain_betas!(p[arange], betabad, g, phiE, 0.1)
 		#p[brange] = betabad
@@ -451,11 +451,6 @@ function spmopt(mi, estimate_alpha = haskey(mi, :a), estimate_beta = haskey(mi, 
         m[:b] = p[brange]
     else
         m[:b] = b
-    end
-    if haskey(data, :c)
-        #phiE = view(x, :, .!g) * m[:b][.!g]
-	    m[:be] = m[:b][.!g]
-	    m[:phiE] = x[:, .!g] * m[:be]
     end
 
     m[:phi] = x*m[:b]
@@ -477,22 +472,25 @@ function spmopt(mi, estimate_alpha = haskey(mi, :a), estimate_beta = haskey(mi, 
             m[:sigma2p] = exp(p[2])
         end
     else
-        m[:sigma2] = mean((y.-m[:yhat]).^2)
+        m[:sigma2] = sum_kbn((y.-m[:yhat]).^2)/n
         m[:ll] = -n/2*log(m[:sigma2])
     end
-	m[:beta] = DataFrame(:pos => m[:data][:pos], :aa => m[:data][:aa])
+	m[:beta] = DataFrame(:pos => data[:pos], :aa => data[:aa])
 	m[:prediction] = DataFrame(:y => m[:data][:y], :yhat => m[:yhat])
 	beta = m[:b][g]
     if estimate_alpha 
 		m[:beta][:b] = beta/mean(abs.(beta))
-		m[:prediction][:phi] = x[:, g] * beta
+		m[:prediction][:phiG] = x[:, g] * m[:beta][:b]
 	else
 		m[:beta][:b] = beta
 	end
-	sort!(m[:beta], cols=:pos)
+	#sort!(m[:beta], :pos)
 	if haskey(data, :c)
 		m[:prediction][:c] = data[:c]
-	end
+        m[:be] = m[:b][.!g]
+	    m[:prediction][:phiE] = x[:, .!g] * m[:be]
+    end
+
     return m
 end
 
@@ -591,7 +589,6 @@ function spm_objective(p, g, x, y, v,
     if estimate_beta
         rsy .= rsvi.*yhatp
         At_mul_B!(view(g, brange), x, rsy)
-        #display("$(p[brange[177]]) $(g[brange[177]])")
     end
     if estimate_alpha
         At_mul_B!(view(g, arange), I, rsvi)
@@ -599,18 +596,314 @@ function spm_objective(p, g, x, y, v,
         #    g[arange[i]] = g[arange[i]]*a[i]
         #end
     end
-   #display(exp.(p[1:2]))
     g .= g/n
-	#display(g[end])
-    return sll
+	return sll
 
 end
 
 function fit(m0::Dict; kwargs...)
+	if !haskey(m0, :data)
+		data = m0
+		m0 = nonepistatic_model(data; kwargs...)
+	end
 	if !haskey(m0, :a)
 	    m0 = spmopt(m0, true, false; kwargs...)
 	end
     spmopt(m0, true, true; kwargs...)
+end
+
+function boot(m; kwargs...)
+    mboot = copy(m)
+    mboot[:data] = copy(m[:data])
+    if haskey(m[:data], :v)
+        v = deepcopy(mboot[:data][:v])
+        if haskey(m, :sigma2p)
+            v[v.==0.0] = m[:sigma2p]
+        end
+        v .= sqrt.(v .+ m[:sigma2])
+    else
+        v = sqrt(m[:sigma2])
+    end    
+    mboot[:data][:y] = randn(length(m[:yhat])).*v .+ m[:yhat]
+    wt = m[:data][:ham] .== 0
+    if all(m[:data][:y][wt] .== 0.0)
+        mboot[:data][:y][wt] = 0.0
+    end
+    spmopt(mboot; kwargs...)
+end
+
+function boot(mi, i, search = false, tol=1e-4; kwargs...)
+    mdls = []
+    lli = mi[:ll]
+    while length(mdls) < i
+        mb = boot(mi; kwargs...)
+        mb[:data] = mi[:data]
+        if search
+            m = spmopt(mb; kwargs...)
+            dll = m[:ll]-mi[:ll]
+            if dll > tol
+                mi = m
+                mdls = []
+            else
+                delete!(mb, :yhat)
+                delete!(mb, :phi)
+				delete!(mb, :prediction)
+				if haskey(mi[:data], :c)
+					delete!(mb, :phiE)
+					delete!(mb, :be)
+				end
+				delete!(mb, :beta)
+                push!(mdls, mb)
+            end
+            display("deltaLL $dll, i $(length(mdls))")
+        else
+            delete!(mb, :yhat)
+            delete!(mb, :phi)
+			delete!(mb, :prediction)
+			if haskey(mi[:data], :c)
+				delete!(mb, :phiE)
+				delete!(mb, :be)
+			end
+			delete!(mb, :beta)
+            push!(mdls, mb)
+            display(length(mdls))
+        end            
+    end
+    display("total change in LL $(mi[:ll]-lli)")
+    return mdls
+end
+
+#using GLM
+#using DataFrames
+function boot_stats(m, mb)
+  bboot = DataFrame(b = Float64[], name = String[])
+  data = m[:data]
+  g = data[:g]
+  names = ["$p$a" for (p,a) in zip(data[:pos],data[:aa])]
+  bnorm = mean(abs.(m[:b][g]))
+  aboot = DataFrame(a = Float64[], i = Int64[])
+  i = collect(1:length(m[:a]))
+	phi = [linspace(minimum(m[:phi]), 0, 101); 0:.01:1; linspace(1,maximum(m[:phi]), 101)]
+    bootCI = DataFrame(phi = Float64[], yhat = Float64[], ddy = Float64[])
+	phi1 = hcat(ones(length(m[:phi])), m[:phi])
+  for mm in mb
+	c = phi1\(data[:x] * mm[:b])
+
+	append!(aboot, DataFrame(a = mm[:a]*bnorm, i = i))
+	append!(bboot, DataFrame(b = mm[:b][g]/c[2]/bnorm, name = names))
+
+	sp = monosplinebasis1(phi*c[2]+c[1], m[:knots], 3)
+	dy = sp[1]*mm[:a]
+    ddy = (dy[2:end].-dy[1:end-1])/(phi[2]-phi[1])
+    append!(bootCI, DataFrame(phi = phi[1:end-1], yhat = (sp[2]*mm[:a])[1:end-1], ddy = ddy))
+  end
+  bbs = by(bboot, :name, d -> DataFrame(med = median(d[:b]), 
+										upper = quantile(d[:b], .975), 
+										lower = quantile(d[:b], .025),
+										se = sqrt(var(d[:b])/length(d[:b]))))
+  bbs = join(bbs, DataFrame(b = m[:beta][:b], name = names), on = :name)
+  ben = bbs[:lower] .> 0
+  del = bbs[:upper] .< 0
+  neut = .!ben .& .!del
+  bbs[:effect] = ["" for i = 1:nrow(bbs)]
+  bbs[:effect][ben] = "beneficial"
+  bbs[:effect][del] = "deleterious"
+  bbs[:effect][neut] = "neutral"
+  bbs[:pos] = data[:pos]
+  bbs[:aa] = data[:aa]
+  bben = sum(bbs[:lower].>0)
+  bdel = sum(bbs[:upper].<0)
+  l = sum(g)
+  display("beta $(l), positive $bben, deleterious $bdel, neutral $(l-bben-bdel) ")
+  ciw = mean(bbs[:upper].-bbs[:lower])
+  display("beta average 95% CI width $ciw")
+  display("beta average SE, $(sqrt(mean(bbs[:se].^2)))")
+  
+  aboot = by(aboot, :i, d -> DataFrame(med = median(d[:a]), upper = quantile(d[:a], .975), lower = quantile(d[:a], .025))) 
+  aboot = join(aboot, DataFrame(a = m[:a]*bnorm, i = i), on = :i)
+	lower(x) = quantile(x, 0.025)
+	upper(x) = quantile(x, 0.975)
+	bootCI = by(bootCI, :phi, d -> DataFrame(yhat_upper = upper(d[:yhat]), yhat_lower = lower(d[:yhat]), 
+					ddy_upper = upper(d[:ddy]), ddy_lower = lower(d[:ddy])))
+#    bootCI = aggregate(bootCI, :phi, [lower, upper])
+	bootCI[:phiG] = (bootCI[:phi]-m[:b][1])/mean(abs.(m[:b][g]))
+	#display(bootCI)
+	ciw = mean(bootCI[:yhat_upper].-bootCI[:yhat_lower])
+	display("g(phi) average CI $ciw")
+	g2k = ([0,1]-m[:b][1])/mean(abs.(m[:b][g]))
+	display("g(phi) boundary $g2k")
+	if any(bootCI[:ddy_lower] .> 0.0)
+		g2p = extrema(bootCI[:phiG][bootCI[:ddy_lower] .> 0.0])
+		display("g(phi) second deriv+ CI $g2p")
+	end
+	if any(bootCI[:ddy_upper] .< 0.0)
+		g2m = extrema(bootCI[:phiG][bootCI[:ddy_upper] .< 0.0])
+		display("g(phi) second deriv- CI $g2m")
+	end
+	#g2p = extrema(bootCI[:phi][bootCI[:ddy_lower] .> 0.0])
+	#display("g(phi) unscaled second deriv+ CI $g2p")
+	#g2m = extrema(bootCI[:phi][bootCI[:ddy_upper] .< 0.0])
+	#display("g(phi) unscaled second deriv- CI $g2m")
+	if haskey(data, :c)
+		lc = levels(data[:c])
+		bootCI[:c] = lc[1]
+		c = m[:b][.!g]
+		gboot1 = deepcopy(bootCI)
+		for i in 2:length(lc)
+			gboot1[:phiG] = (gboot1[:phi]-c[1]-c[i])/bnorm
+			gboot1[:c] = lc[i]
+			append!(bootCI, gboot1)
+		end
+		minphiG, maxphiG = extrema(m[:prediction][:phiG])
+		phiGrange = (bootCI[:phiG] .> minphiG) .& (bootCI[:phiG] .< maxphiG)
+		bootCI = bootCI[phiGrange,:]
+	end
+	bootCI[:yhat] = monosplinebasis1(bootCI[:phi], m[:knots], 3)[2]*m[:a]
+
+
+  return (bbs, aboot, bootCI)
+end
+
+
+import StatsBase.predict
+
+
+function designmatrix_listofmuts(wt, seq, delim, code = Dict{String, Int64}())
+    n = length(seq)
+	I = collect(1:n)
+    J = ones(Int64, n)
+    j = 2
+    for (i,s) in enumerate(seq)
+        if s != wt
+            for k in split(s, delim)
+                if !haskey(code, k)
+                    code[k] = j
+                    j += 1
+                end
+                push!(I, i)
+                push!(J, code[k])
+            end
+        end
+    end
+	return sparse(I, J, 1.0)
+end
+
+function designmatrix_sequence(wt, seq, pos, code = Dict{String, Int64}())
+    n = length(seq)
+	I = collect(1:n)
+    J = ones(Int64, n)
+    j = 2
+    ns = length(seq[1])
+    for (i,s) in enumerate(seq)
+        for p = 1:ns
+            if s[p] != wt[p]
+                k = string(wt[p], pos[p], s[p])
+                push!(I, i)
+                push!(J, code[k])
+            end
+        end
+    end
+	return sparse(I, J, 1.0)
+end
+
+function designmatrix(data, wt, seq, kind, delim, pos)
+    code = data[:code]
+    n = length(seq)
+	I = collect(1:n)
+    J = ones(Int64, n)
+    if kind == :listofmuts
+        for (i,s) in enumerate(seq)
+            if s != wt
+                for k in split(s, delim)
+                    push!(I, i)
+                    push!(J, code[k])
+                end
+            end
+        end
+    elseif kind == :sequence
+        ns = length(seq[1])
+        for (i,s) in enumerate(seq)
+            for p = 1:ns
+                if s[p] != wt[p]
+                    k = string(wt[p], pos[p], s[p])
+                    push!(I, i)
+                    push!(J, code[k])
+                end
+            end
+		end
+    else
+        error("must be :listofmuts or :sequence")
+    end
+	return sparse(I, J, 1.0, n, size(data[:x], 2))
+end
+
+function predictx(m, x::SparseMatrixCSC{Float64,Int64})
+    g = m[:data][:g]
+    phi = x*m[:b]
+    if haskey(m, :a)
+        yhat = monosplinebasis1(phi, m[:knots], 3)[2]*m[:a]
+	    phiG = x[:, g] * m[:beta][:b]
+		return DataFrame(phi = phi, phiG = phiG, yhat = yhat)
+    else
+        return DataFrame(yhat = phi)
+    end
+end	
+
+function predict(m, seq, kind; wt = m[:data][:wt], delim = '-', pos = 1:length(seq[1]))
+    x = designmatrix(m[:data], wt, seq, kind, delim, pos)
+	predictx(m, x)
+end
+
+function cvpredict(data, fun, nfold; eachcondition = false, kwargs...)
+  x = data[:x]
+  g = data[:g]
+	if eachcondition
+	  nfold = ceil(Int64, mean(sum(x[:, g], 1)))
+	  p = zeros(Int64, size(x,1))
+	  for i in find(g)
+		xi = find(view(x, :, i))
+		l = length(xi)
+		p[xi] = shuffle!(collect(1:l))
+	  end
+	else
+		n = length(data[:y])
+		p = ceil.(Int, collect(1:n)/n*nfold)
+		shuffle!(p)
+	end
+    yhat = zeros(data[:y])
+	function pred1(i)
+		display(i)
+		data1 = copy(data)
+		traini = p .!= i
+		data1[:x] = data[:x][traini,:]
+		data1[:y] = data[:y][traini]
+        if haskey(data, :v)
+            data1[:v] = data[:v][traini]
+        end
+		if haskey(data, :c)
+			data1[:c] = data[:c][traini]
+		end
+		mcv = fun(data1; kwargs...)
+        testi = p .== i
+		yhat[testi] = predictx(mcv, data[:x][testi, :])[:yhat]
+	end
+	map(pred1, 1:nfold)
+	display("$nfold fold cross-validated correlation $(cor(yhat,data[:y]))")
+	return yhat
+end
+
+function lrt(ii, m0, f1, f2)
+    m1 = f2(m0)
+	dl = m1[:ll]-m0[:ll]
+    display("delta LL $dl")
+	if dl == 0.0
+		error("no change in likelihood")
+	end
+    m0b = pmap(f1, repeat([m0], inner=ii))
+    m1b = pmap(f2, m0b)
+    dl = map((m0,m1) -> m1[:ll] - m0[:ll], m0b, m1b)
+    display("p = $(mean(dl .> m1[:ll]-m0[:ll]))")
+    return dl
 end
 
 end # module
