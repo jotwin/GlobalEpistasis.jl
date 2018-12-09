@@ -1,7 +1,3 @@
-# RECOMMENDATION
-I recommend using the epistasis software from the Harms lab, which has many more features.
-https://epistasis.readthedocs.io/
-
 # GlobalEpistasis
 
 ## install and load data
